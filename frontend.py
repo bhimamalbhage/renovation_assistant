@@ -28,7 +28,7 @@ HTML = f"""<!DOCTYPE html>
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Bob – Renovation Assistant</title>
+  <title>Renovation Assistant</title>
   <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -103,6 +103,11 @@ HTML = f"""<!DOCTYPE html>
       background: radial-gradient(circle at 35% 35%, #34d399, #059669);
       box-shadow: 0 0 24px 6px rgba(5,150,105,0.5);
       animation: pulse 0.5s ease-in-out infinite;
+    }}
+    .orb.alice-speaking {{
+      background: radial-gradient(circle at 35% 35%, #67e8f9, #0891b2);
+      box-shadow: 0 0 24px 6px rgba(8,145,178,0.55);
+      animation: pulse 0.9s ease-in-out infinite;
     }}
     @keyframes pulse {{
       0%, 100% {{ transform: scale(1);    opacity: 1; }}
@@ -198,7 +203,7 @@ HTML = f"""<!DOCTYPE html>
       to   {{ opacity: 1; transform: translateY(0); }}
     }}
 
-    .msg.bob {{ align-self: flex-start; }}
+    .msg.bob, .msg.alice {{ align-self: flex-start; }}
     .msg.user {{
       align-self: flex-end;
       flex-direction: row-reverse;
@@ -211,8 +216,9 @@ HTML = f"""<!DOCTYPE html>
       align-self: stretch;
       margin-top: 2px;
     }}
-    .msg.bob  .msg-icon {{ background: #667eea; }}
-    .msg.user .msg-icon {{ background: #059669; }}
+    .msg.bob   .msg-icon {{ background: #667eea; }}
+    .msg.alice .msg-icon {{ background: #0891b2; }}
+    .msg.user  .msg-icon {{ background: #059669; }}
 
     .msg-body {{ display: flex; flex-direction: column; gap: 3px; }}
     .msg-sender {{
@@ -233,8 +239,9 @@ HTML = f"""<!DOCTYPE html>
       background: #f3f4f6;
       word-break: break-word;
     }}
-    .msg.bob  .bubble {{ border-top-left-radius: 4px; background: #f3f4f6; }}
-    .msg.user .bubble {{ border-top-right-radius: 4px; background: #ede9fe; color: #4c1d95; }}
+    .msg.bob   .bubble {{ border-top-left-radius: 4px; background: #f3f4f6; }}
+    .msg.alice .bubble {{ border-top-left-radius: 4px; background: #ecfeff; color: #164e63; }}
+    .msg.user  .bubble {{ border-top-right-radius: 4px; background: #ede9fe; color: #4c1d95; }}
 
     .bubble.interim {{
       opacity: 0.55;
@@ -280,7 +287,7 @@ HTML = f"""<!DOCTYPE html>
     </div>
 
     <button class="connect-btn" id="connectBtn" onclick="toggle()">
-      Connect &amp; Talk to Bob
+      Connect &amp; Talk
     </button>
   </div>
 
@@ -303,8 +310,33 @@ HTML = f"""<!DOCTYPE html>
 <script>
 const LIVEKIT_URL = "{LIVEKIT_URL}";
 let room = null;
+let currentAgent = "bob";
 // Map: segmentId -> {{ role, bubbleEl }}
 const segments = new Map();
+
+const AGENT_CONFIG = {{
+  bob:   {{ name: "Bob",   sub: "Renovation Planning<br>Assistant",
+            gradient: "linear-gradient(135deg, #667eea, #764ba2)",
+            shadow: "0 0 0 4px rgba(102,126,234,0.3)",
+            speakClass: "bob-speaking", speakLabel: "Bob is speaking",
+            listenLabel: "Bob is listening" }},
+  alice: {{ name: "Alice", sub: "Technical Specialist<br>& Risk Advisor",
+            gradient: "linear-gradient(135deg, #67e8f9, #0891b2)",
+            shadow: "0 0 0 4px rgba(8,145,178,0.3)",
+            speakClass: "alice-speaking", speakLabel: "Alice is speaking",
+            listenLabel: "Alice is listening" }}
+}};
+
+function updateAgentUI(agent) {{
+  const cfg = AGENT_CONFIG[agent];
+  if (!cfg) return;
+  document.querySelector(".agent-name").textContent = cfg.name;
+  document.querySelector(".agent-sub").innerHTML = cfg.sub;
+  document.querySelector(".avatar-ring").style.background = cfg.gradient;
+  document.querySelector(".avatar-ring").style.boxShadow = cfg.shadow;
+  // Update orb label if connected
+  if (room) setOrb("", cfg.listenLabel);
+}}
 
 /* ── Helpers ── */
 function $(id) {{ return document.getElementById(id); }}
@@ -348,7 +380,7 @@ function addOrUpdateSegment(segId, role, text, isFinal) {{
 
   const sender = document.createElement("div");
   sender.className = "msg-sender";
-  sender.textContent = isUser ? "You" : "Bob";
+  sender.textContent = isUser ? "You" : AGENT_CONFIG[role]?.name || role;
 
   const bubble = document.createElement("div");
   bubble.className = "bubble" + (isFinal ? "" : " interim");
@@ -393,18 +425,31 @@ async function connect() {{
     room.on(LivekitClient.RoomEvent.ActiveSpeakersChanged, (speakers) => {{
       const ids = speakers.map(s => s.identity);
       const localId = room.localParticipant.identity;
-      const bobSpeaking  = ids.some(id => id !== localId);
-      const userSpeaking = ids.includes(localId);
+      const cfg = AGENT_CONFIG[currentAgent];
+      const agentSpeaking = ids.some(id => id !== localId);
+      const userSpeaking  = ids.includes(localId);
 
-      if (bobSpeaking)       {{ setOrb("bob-speaking",  "Bob is speaking"); }}
-      else if (userSpeaking) {{ setOrb("user-speaking", "Listening…");      }}
-      else                   {{ setOrb("",              "Bob is listening"); }}
+      if (agentSpeaking)     {{ setOrb(cfg.speakClass,  cfg.speakLabel); }}
+      else if (userSpeaking) {{ setOrb("user-speaking", "Listening…");   }}
+      else                   {{ setOrb("",              cfg.listenLabel); }}
+    }});
+
+    /* Agent switch data messages */
+    room.on(LivekitClient.RoomEvent.DataReceived, (payload, participant, kind, topic) => {{
+      if (topic !== "agent.info") return;
+      try {{
+        const msg = JSON.parse(new TextDecoder().decode(payload));
+        if (msg.type === "agent_switch" && AGENT_CONFIG[msg.agent]) {{
+          currentAgent = msg.agent;
+          updateAgentUI(currentAgent);
+        }}
+      }} catch(e) {{ console.warn("Bad agent data message", e); }}
     }});
 
     /* Transcriptions → chat bubbles */
     room.on(LivekitClient.RoomEvent.TranscriptionReceived, (segs, participant) => {{
       const isUser = participant && participant.identity === room.localParticipant.identity;
-      const role   = isUser ? "user" : "bob";
+      const role   = isUser ? "user" : currentAgent;
       for (const seg of segs) {{
         if (seg.text.trim()) addOrUpdateSegment(seg.id, role, seg.text, seg.final);
       }}
@@ -413,10 +458,12 @@ async function connect() {{
     /* Disconnect */
     room.on(LivekitClient.RoomEvent.Disconnected, () => {{
       room = null;
+      currentAgent = "bob";
       setOrb("", "—");
       setChatSub("Disconnected");
       $("liveDot").classList.remove("live");
-      btn.textContent = "Connect & Talk to Bob";
+      updateAgentUI("bob");
+      btn.textContent = "Connect & Talk";
       btn.classList.remove("end");
       btn.disabled = false;
     }});
@@ -424,7 +471,7 @@ async function connect() {{
     await room.connect(LIVEKIT_URL, token);
     await room.localParticipant.setMicrophoneEnabled(true);
 
-    setOrb("", "Bob is listening");
+    setOrb("", AGENT_CONFIG[currentAgent].listenLabel);
     setChatSub("Live");
     $("liveDot").classList.add("live");
     btn.textContent = "End Conversation";
