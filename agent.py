@@ -3,6 +3,7 @@ import json
 import logging
 from dotenv import load_dotenv
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, function_tool, get_job_context
+from livekit.agents.metrics import LLMMetrics, TTSMetrics, log_metrics
 from livekit.plugins import deepgram, openai, silero
 
 load_dotenv()
@@ -130,9 +131,25 @@ async def entrypoint(ctx: JobContext):
     session = AgentSession(
         vad=silero.VAD.load(),
         stt=deepgram.STT(model="nova-2"),
-        llm=openai.LLM(model="gpt-4o"),
+        llm=openai.LLM(model="gpt-4o-mini"),
         tts=openai.TTS(voice="alloy"),
     )
+
+    @session.on("metrics_collected")
+    def _on_metrics(ev):
+        m = ev.metrics
+        log_metrics(m, logger=logger)
+        data = None
+        if isinstance(m, LLMMetrics):
+            data = {"type": "llm_metrics", "ttft": round(m.ttft * 1000)}
+        elif isinstance(m, TTSMetrics):
+            data = {"type": "tts_metrics", "ttfb": round(m.ttfb * 1000)}
+        if data:
+            asyncio.ensure_future(
+                ctx.room.local_participant.publish_data(
+                    json.dumps(data).encode(), topic="agent.metrics"
+                )
+            )
 
     await session.start(
         agent=BobAgent(),

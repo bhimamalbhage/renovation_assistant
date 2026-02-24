@@ -248,6 +248,13 @@ HTML = f"""<!DOCTYPE html>
       font-style: italic;
     }}
 
+    .msg-latency {{
+      font-size: 10px;
+      color: #9ca3af;
+      letter-spacing: 0.3px;
+      padding: 1px 2px;
+    }}
+
     /* Typing dots shown while Bob is "thinking" */
     .typing-dots span {{
       display: inline-block;
@@ -313,6 +320,8 @@ let room = null;
 let currentAgent = "bob";
 // Map: segmentId -> {{ role, bubbleEl }}
 const segments = new Map();
+let pendingMetrics = {{}};   // buffered TTFT/TTFB from server before bubble exists
+let lastAgentBody = null;    // most recent agent msg-body element
 
 const AGENT_CONFIG = {{
   bob:   {{ name: "Bob",   sub: "Renovation Planning<br>Assistant",
@@ -359,12 +368,34 @@ function hideEmpty() {{
   if (e) e.remove();
 }}
 
+function flushMetrics() {{
+  if (!lastAgentBody) return;
+  if (!pendingMetrics.ttft && !pendingMetrics.ttfb) return;
+  let el = lastAgentBody.querySelector(".msg-latency");
+  if (!el) {{
+    el = document.createElement("div");
+    el.className = "msg-latency";
+    lastAgentBody.appendChild(el);
+  }}
+  const parts = [];
+  if (pendingMetrics.ttft) parts.push(`TTFT ${{pendingMetrics.ttft}}ms`);
+  if (pendingMetrics.ttfb) parts.push(`TTFB ${{pendingMetrics.ttfb}}ms`);
+  el.textContent = parts.length ? `⚡ ${{parts.join(" · ")}}` : "";
+  scrollBottom();
+}}
+
 function addOrUpdateSegment(segId, role, text, isFinal) {{
   if (segments.has(segId)) {{
     const {{ bubbleEl }} = segments.get(segId);
     bubbleEl.textContent = text;
     if (isFinal) bubbleEl.classList.remove("interim");
     return;
+  }}
+
+  // New user segment → reset metrics tracking for next agent turn
+  if (role === "user") {{
+    pendingMetrics = {{}};
+    lastAgentBody = null;
   }}
 
   hideEmpty();
@@ -388,6 +419,13 @@ function addOrUpdateSegment(segId, role, text, isFinal) {{
 
   body.appendChild(sender);
   body.appendChild(bubble);
+
+  // First agent segment of this turn → attach metrics target
+  if (role !== "user" && !lastAgentBody) {{
+    lastAgentBody = body;
+    flushMetrics();
+  }}
+
   wrap.appendChild(icon);
   wrap.appendChild(body);
   $("messages").appendChild(wrap);
@@ -434,14 +472,20 @@ async function connect() {{
       else                   {{ setOrb("",              cfg.listenLabel); }}
     }});
 
-    /* Agent switch data messages */
+    /* Agent data messages (switch + metrics) */
     room.on(LivekitClient.RoomEvent.DataReceived, (payload, participant, kind, topic) => {{
-      if (topic !== "agent.info") return;
       try {{
         const msg = JSON.parse(new TextDecoder().decode(payload));
-        if (msg.type === "agent_switch" && AGENT_CONFIG[msg.agent]) {{
+        if (topic === "agent.info" && msg.type === "agent_switch" && AGENT_CONFIG[msg.agent]) {{
           currentAgent = msg.agent;
           updateAgentUI(currentAgent);
+        }} else if (topic === "agent.metrics") {{
+          if (msg.type === "llm_metrics" && !pendingMetrics.ttft) {{
+            pendingMetrics.ttft = msg.ttft;
+          }} else if (msg.type === "tts_metrics" && !pendingMetrics.ttfb) {{
+            pendingMetrics.ttfb = msg.ttfb;
+          }}
+          flushMetrics();
         }}
       }} catch(e) {{ console.warn("Bad agent data message", e); }}
     }});
